@@ -26,3 +26,4 @@ dist-ssr
 backend/node_modules
 backend/.wwebjs_auth
 backend/.wwebjs_cache
+my-app/.wwebjs_auth/
