@@ -6,6 +6,7 @@ const http = require("http");
 const socketIo = require("socket.io");
 const multer = require("multer");
 const path = require("path");
+const process = require("process");
 
 const app = express();
 const server = http.createServer(app);
@@ -38,8 +39,48 @@ const upload = multer({ storage });
 let client;
 let isClientReady = false;
 let qrCodeString = "";
+let initializing = false; // Prevent multiple initializations
+
+// Safe destroy helper to avoid calling methods on null/closed contexts
+const safeDestroyClient = async (reason = "") => {
+  if (!client) return;
+  console.log("Safe destroying client", reason);
+  try {
+    try {
+      if (client.info) {
+        // attempt graceful logout if possible
+        await client.logout().catch((e) => {
+          console.warn("Logout error (ignored):", e?.message || e);
+        });
+      }
+    } catch (e) {
+      console.warn("Error during logout step:", e?.message || e);
+    }
+
+    try {
+      await client.destroy().catch((e) => {
+        console.warn("Destroy error (ignored):", e?.message || e);
+      });
+    } catch (e) {
+      console.warn("Error during destroy step:", e?.message || e);
+    }
+  } catch (e) {
+    console.warn("Unexpected error in safeDestroyClient:", e?.message || e);
+  } finally {
+    client = null;
+    isClientReady = false;
+    qrCodeString = "";
+    initializing = false;
+  }
+};
 
 const initializeWhatsApp = () => {
+  if (client || initializing) {
+    // Prevent multiple clients or double initialization
+
+    return;
+  }
+  initializing = true;
   client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
@@ -64,6 +105,7 @@ const initializeWhatsApp = () => {
   client.on("ready", () => {
     console.log("WhatsApp client is ready!");
     isClientReady = true;
+    initializing = false;
     io.emit("client-ready");
   });
 
@@ -74,16 +116,25 @@ const initializeWhatsApp = () => {
 
   client.on("auth_failure", (msg) => {
     console.error("Authentication failed:", msg);
+    initializing = false;
     io.emit("auth-failure", msg);
   });
 
-  client.on("disconnected", (reason) => {
+  client.on("disconnected", async (reason) => {
     console.log("WhatsApp client disconnected:", reason);
-    isClientReady = false;
+    // attempt safe cleanup
+    await safeDestroyClient("disconnected");
     io.emit("disconnected", reason);
+    // try to reinitialize after a short delay, if desired
+    setTimeout(() => {
+      if (!client && !initializing) initializeWhatsApp();
+    }, 3000);
   });
 
-  client.initialize();
+  client.initialize().catch(async (err) => {
+    console.error("Error initializing WhatsApp client:", err);
+    await safeDestroyClient("init-error");
+  });
 };
 
 // Routes
@@ -303,14 +354,14 @@ app.post("/api/send-bulk", upload.single("image"), async (req, res) => {
 app.post("/api/logout", async (req, res) => {
   try {
     if (client) {
-      await client.logout();
-      await client.destroy();
-      isClientReady = false;
-      qrCodeString = "";
+      // Use safe destroy to avoid calling methods on null contexts
+      await safeDestroyClient("logout");
       io.emit("logged-out");
 
-      // Reinitialize client for next connection immediately
-      initializeWhatsApp();
+      // Reinitialize after delay to allow puppeteer cleanup
+      setTimeout(() => {
+        if (!client && !initializing) initializeWhatsApp();
+      }, 3000);
     }
 
     res.json({ success: true, message: "Logged out successfully" });
@@ -339,6 +390,14 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => {
     console.log("Client disconnected");
   });
+});
+
+// Global error handlers to keep server running and log issues
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled Rejection:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err);
 });
 
 // Initialize WhatsApp client
