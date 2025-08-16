@@ -169,7 +169,7 @@ app.post("/api/send-bulk", upload.single("image"), async (req, res) => {
       return res.status(400).json({ error: "WhatsApp client not ready" });
     }
 
-    const { contacts, message } = req.body;
+    const { contacts, message, batchSettings } = req.body;
     const imageFile = req.file;
 
     if (!contacts || !message) {
@@ -179,55 +179,118 @@ app.post("/api/send-bulk", upload.single("image"), async (req, res) => {
     }
 
     const contactsList = JSON.parse(contacts);
+    const settings = batchSettings ? JSON.parse(batchSettings) : null;
     const results = [];
 
-    for (let i = 0; i < contactsList.length; i++) {
-      const contact = contactsList[i];
+    // Helper function to get random delay
+    const getRandomDelay = () => {
+      if (!settings?.randomDelay?.enabled) return 2000; // Default 2 seconds
 
-      try {
-        // Format number
-        let formattedNumber = contact.mobileNumber.replace(/\D/g, "");
-        if (!formattedNumber.startsWith("91")) {
-          formattedNumber = "91" + formattedNumber;
-        }
-        formattedNumber += "@c.us";
+      const min = (settings.randomDelay.min || 0) * 1000;
+      const max = (settings.randomDelay.max || 5) * 1000;
+      return Math.floor(Math.random() * (max - min + 1)) + min;
+    };
 
-        let sentMessage;
+    // Helper function to process a batch
+    const processBatch = async (batch, batchIndex) => {
+      console.log(
+        `Processing batch ${batchIndex + 1} with ${batch.length} contacts`
+      );
 
-        if (imageFile) {
-          const media = MessageMedia.fromFilePath(imageFile.path);
-          sentMessage = await client.sendMessage(formattedNumber, media, {
-            caption: message,
+      for (let i = 0; i < batch.length; i++) {
+        const contact = batch[i];
+        const globalIndex =
+          batchIndex * (settings?.batchSize || contactsList.length) + i;
+
+        try {
+          // Format number
+          let formattedNumber = contact.mobileNumber.replace(/\D/g, "");
+          if (!formattedNumber.startsWith("91")) {
+            formattedNumber = "91" + formattedNumber;
+          }
+          formattedNumber += "@c.us";
+
+          let sentMessage;
+
+          if (imageFile) {
+            const media = MessageMedia.fromFilePath(imageFile.path);
+            sentMessage = await client.sendMessage(formattedNumber, media, {
+              caption: message,
+            });
+          } else {
+            sentMessage = await client.sendMessage(formattedNumber, message);
+          }
+
+          results.push({
+            success: true,
+            contact,
+            messageId: sentMessage.id.id,
           });
-        } else {
-          sentMessage = await client.sendMessage(formattedNumber, message);
+
+          // Emit progress
+          io.emit("bulk-progress", {
+            current: globalIndex + 1,
+            total: contactsList.length,
+            contact: contact.displayName,
+            batch: batchIndex + 1,
+            totalBatches: settings?.enableBatching
+              ? Math.ceil(contactsList.length / settings.batchSize)
+              : 1,
+          });
+
+          // Apply random delay between messages (except for last message in batch)
+          if (i < batch.length - 1) {
+            const delay = getRandomDelay();
+            console.log(`Waiting ${delay}ms before next message...`);
+            await new Promise((resolve) => setTimeout(resolve, delay));
+          }
+        } catch (error) {
+          console.error(`Error sending to ${contact.displayName}:`, error);
+          results.push({
+            success: false,
+            contact,
+            error: error.message,
+          });
         }
-
-        results.push({
-          success: true,
-          contact,
-          messageId: sentMessage.id.id,
-        });
-
-        // Emit progress
-        io.emit("bulk-progress", {
-          current: i + 1,
-          total: contactsList.length,
-          contact: contact.displayName,
-        });
-
-        // Delay between messages to avoid rate limiting
-        if (i < contactsList.length - 1) {
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-        }
-      } catch (error) {
-        console.error(`Error sending to ${contact.displayName}:`, error);
-        results.push({
-          success: false,
-          contact,
-          error: error.message,
-        });
       }
+    };
+
+    if (settings?.enableBatching) {
+      // Process in batches
+      const batchSize = settings.batchSize || 50;
+      const batches = [];
+
+      for (let i = 0; i < contactsList.length; i += batchSize) {
+        batches.push(contactsList.slice(i, i + batchSize));
+      }
+
+      console.log(
+        `Sending ${contactsList.length} messages in ${batches.length} batches of ${batchSize}`
+      );
+
+      for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+        await processBatch(batches[batchIndex], batchIndex);
+
+        // Wait between batches (except for last batch)
+        if (batchIndex < batches.length - 1) {
+          const batchDelay = (settings.delayBetweenBatches || 60) * 60 * 1000; // Convert minutes to milliseconds
+          console.log(
+            `Waiting ${settings.delayBetweenBatches} minutes before next batch...`
+          );
+
+          // Emit batch delay progress
+          io.emit("batch-delay", {
+            currentBatch: batchIndex + 1,
+            totalBatches: batches.length,
+            delayMinutes: settings.delayBetweenBatches,
+          });
+
+          await new Promise((resolve) => setTimeout(resolve, batchDelay));
+        }
+      }
+    } else {
+      // Process all contacts as one batch
+      await processBatch(contactsList, 0);
     }
 
     res.json({ results });
@@ -284,5 +347,4 @@ initializeWhatsApp();
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
-  console.log(`Server running on port ${PORT}`);
-
+console.log(`Server running on port ${PORT}`);

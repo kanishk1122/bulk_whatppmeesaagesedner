@@ -129,6 +129,7 @@ export class WhatsAppService {
     contacts,
     message,
     imageFile = null,
+    batchSettings = null,
     onProgress = null
   ) {
     if (!this.isConnected) {
@@ -142,6 +143,10 @@ export class WhatsAppService {
 
       if (imageFile) {
         formData.append("image", imageFile);
+      }
+
+      if (batchSettings) {
+        formData.append("batchSettings", JSON.stringify(batchSettings));
       }
 
       const response = await fetch(`${this.baseURL}/send-bulk`, {

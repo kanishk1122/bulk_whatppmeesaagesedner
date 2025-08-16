@@ -16,6 +16,18 @@ function App() {
   const [currentContact, setCurrentContact] = useState("");
   const [isLoggingOut, setIsLoggingOut] = useState(false);
 
+  // Batch settings
+  const [batchSettings, setBatchSettings] = useState({
+    enableBatching: false,
+    batchSize: 50,
+    delayBetweenBatches: 60, // minutes
+    randomDelay: {
+      enabled: false,
+      min: 0,
+      max: 5, // seconds
+    },
+  });
+
   const fileInputRef = useRef(null);
   const imageInputRef = useRef(null);
   const whatsappService = useRef(new WhatsAppService());
@@ -92,6 +104,23 @@ function App() {
     };
   }, [imagePreview]);
 
+  const handleBatchSettingsChange = (key, value) => {
+    setBatchSettings((prev) => ({
+      ...prev,
+      [key]: value,
+    }));
+  };
+
+  const handleRandomDelayChange = (key, value) => {
+    setBatchSettings((prev) => ({
+      ...prev,
+      randomDelay: {
+        ...prev.randomDelay,
+        [key]: value,
+      },
+    }));
+  };
+
   const sendMessages = async () => {
     if (!message.trim() || contacts.length === 0) {
       alert("Please provide a message and upload contacts");
@@ -112,7 +141,8 @@ function App() {
       const messageResults = await whatsappService.current.sendBulkMessages(
         contacts,
         message,
-        imageFile
+        imageFile,
+        batchSettings
       );
 
       setResults(messageResults);
@@ -148,9 +178,9 @@ function App() {
     <div className="app">
       <h1>WhatsApp Bulk Messenger</h1>
 
-      <div className="info-banner">
+      {/* <div className="info-banner">
         📱 All messages will be sent to: <strong>9314539152</strong>
-      </div>
+      </div> */}
 
       <div className="section">
         <h2>1. WhatsApp Connection</h2>
@@ -193,7 +223,117 @@ function App() {
       </div>
 
       <div className="section">
-        <h2>3. Compose Message</h2>
+        <h2>3. Batch Settings</h2>
+        <div className="batch-settings">
+          <div className="setting-group">
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={batchSettings.enableBatching}
+                onChange={(e) =>
+                  handleBatchSettingsChange("enableBatching", e.target.checked)
+                }
+              />
+              Split Messages Into Batches
+            </label>
+          </div>
+
+          {batchSettings.enableBatching && (
+            <>
+              <div className="setting-group">
+                <label>
+                  Send in batches of:
+                  <input
+                    type="number"
+                    min="1"
+                    max="100"
+                    value={batchSettings.batchSize}
+                    onChange={(e) =>
+                      handleBatchSettingsChange(
+                        "batchSize",
+                        parseInt(e.target.value)
+                      )
+                    }
+                    className="number-input"
+                  />
+                  messages
+                </label>
+              </div>
+
+              <div className="setting-group">
+                <label>
+                  Wait between batches:
+                  <input
+                    type="number"
+                    min="1"
+                    max="1440"
+                    value={batchSettings.delayBetweenBatches}
+                    onChange={(e) =>
+                      handleBatchSettingsChange(
+                        "delayBetweenBatches",
+                        parseInt(e.target.value)
+                      )
+                    }
+                    className="number-input"
+                  />
+                  minutes after every batch
+                </label>
+              </div>
+            </>
+          )}
+
+          <div className="setting-group">
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={batchSettings.randomDelay.enabled}
+                onChange={(e) =>
+                  handleRandomDelayChange("enabled", e.target.checked)
+                }
+              />
+              Random time gap
+            </label>
+          </div>
+
+          {batchSettings.randomDelay.enabled && (
+            <div className="random-delay-settings">
+              <div className="delay-range">
+                <label>
+                  From:
+                  <input
+                    type="number"
+                    min="0"
+                    max="60"
+                    value={batchSettings.randomDelay.min}
+                    onChange={(e) =>
+                      handleRandomDelayChange("min", parseInt(e.target.value))
+                    }
+                    className="number-input small"
+                  />
+                  sec
+                </label>
+                <label>
+                  To:
+                  <input
+                    type="number"
+                    min="0"
+                    max="60"
+                    value={batchSettings.randomDelay.max}
+                    onChange={(e) =>
+                      handleRandomDelayChange("max", parseInt(e.target.value))
+                    }
+                    className="number-input small"
+                  />
+                  sec
+                </label>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="section">
+        <h2>4. Compose Message</h2>
         <textarea
           value={message}
           onChange={(e) => setMessage(e.target.value)}
@@ -204,7 +344,7 @@ function App() {
       </div>
 
       <div className="section">
-        <h2>4. Upload Image (Optional)</h2>
+        <h2>5. Upload Image (Optional)</h2>
         <input
           type="file"
           accept="image/*"
@@ -238,7 +378,7 @@ function App() {
       </div>
 
       <div className="section">
-        <h2>5. Send Messages</h2>
+        <h2>6. Send Messages</h2>
         <button
           onClick={sendMessages}
           disabled={isSending || !isConnected || contacts.length === 0}
