@@ -25,61 +25,93 @@ class WhatsAppServer {
   }
 
   _initClient() {
-    try {
-      this.client = new Client({
-        authStrategy: new LocalAuth({
-          dataPath: this.sessionPath,
-          clientId: "default",
-        }),
-        puppeteer: {
+    (async () => {
+      try {
+        // Default puppeteer options (safe local defaults)
+        let puppeteerOptions = {
           headless: true,
-          args: ["--no-sandbox", "--disable-setuid-sandbox"],
-        },
-      });
+          args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+          ],
+        };
 
-      this.client.on("qr", async (qr) => {
-        this.qr = qr;
+        // Try to detect chrome-aws-lambda (used on Vercel/AWS Lambda)
         try {
-          const dataUrl = await qrcode.toDataURL(qr);
-          this.emitter.emit("qr-code", dataUrl);
-        } catch (err) {
-          console.error("QR generation error", err);
-        }
-      });
-
-      this.client.on("ready", () => {
-        this.isReady = true;
-        this.emitter.emit("client-ready");
-      });
-
-      this.client.on("authenticated", () => {
-        this.emitter.emit("authenticated");
-      });
-
-      this.client.on("auth_failure", (msg) => {
-        this.emitter.emit("auth-failure", msg);
-      });
-
-      this.client.on("disconnected", (reason) => {
-        this.isReady = false;
-        this.qr = "";
-        this.emitter.emit("disconnected", reason);
-        // reinitialize to allow new connection
-        setTimeout(() => this._reinit(), 1000);
-      });
-
-      this.client.initialize();
-    } catch (err) {
-      console.error("Failed to initialize WhatsApp client:", err);
-      // schedule a retry
-      setTimeout(() => {
-        try {
-          this._reinit();
+          const chromeAws = require("chrome-aws-lambda");
+          const exePath = await chromeAws.executablePath;
+          if (exePath) {
+            puppeteerOptions = {
+              args: chromeAws.args.concat(["--disable-dev-shm-usage"]),
+              executablePath: exePath,
+              headless: chromeAws.headless,
+            };
+            console.log("Using chrome-aws-lambda executable:", exePath);
+          }
         } catch (e) {
-          console.error("Retry failed:", e);
+          // chrome-aws-lambda not available — fallback below
         }
-      }, 5000);
-    }
+
+        // If user supplied a CHROME_PATH (custom), prefer that
+        if (process.env.CHROME_PATH) {
+          puppeteerOptions.executablePath = process.env.CHROME_PATH;
+          console.log("Using CHROME_PATH from env:", process.env.CHROME_PATH);
+        }
+
+        this.client = new Client({
+          authStrategy: new LocalAuth({
+            dataPath: this.sessionPath,
+            clientId: "default",
+          }),
+          puppeteer: puppeteerOptions,
+        });
+
+        this.client.on("qr", async (qr) => {
+          this.qr = qr;
+          try {
+            const dataUrl = await qrcode.toDataURL(qr);
+            this.emitter.emit("qr-code", dataUrl);
+          } catch (err) {
+            console.error("QR generation error", err);
+          }
+        });
+
+        this.client.on("ready", () => {
+          this.isReady = true;
+          this.emitter.emit("client-ready");
+        });
+
+        this.client.on("authenticated", () => {
+          this.emitter.emit("authenticated");
+        });
+
+        this.client.on("auth_failure", (msg) => {
+          this.emitter.emit("auth-failure", msg);
+        });
+
+        this.client.on("disconnected", (reason) => {
+          this.isReady = false;
+          this.qr = "";
+          this.emitter.emit("disconnected", reason);
+          // reinitialize to allow new connection
+          setTimeout(() => this._reinit(), 1000);
+        });
+
+        // Await initialize so we can catch errors (e.g. missing browser)
+        await this.client.initialize();
+      } catch (err) {
+        console.error("Failed to initialize WhatsApp client:", err);
+        // schedule a retry
+        setTimeout(() => {
+          try {
+            this._reinit();
+          } catch (e) {
+            console.error("Retry failed:", e);
+          }
+        }, 5000);
+      }
+    })();
   }
 
   // Clear saved LocalAuth/session data and reinitialize client (forces QR)
