@@ -1,4 +1,5 @@
 import whatsappServer from "../../../lib/whatsappServer";
+import { Buffer } from "buffer";
 
 export async function POST(request) {
   try {

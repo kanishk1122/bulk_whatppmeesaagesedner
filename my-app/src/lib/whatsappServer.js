@@ -17,7 +17,7 @@ class WhatsAppServer {
     this.client = null;
     this.isReady = false;
     this.qr = "";
-    // dedicated session directory so we can clear it when needed
+    // directory where LocalAuth/session data will be stored
     this.sessionPath = path.join(process.cwd(), "whatsapp-session");
     this._initClient();
     globalThis.__whatsappServer = this;
@@ -86,22 +86,26 @@ class WhatsAppServer {
   async clearSession() {
     // destroy current client if exists
     if (this.client && typeof this.client.destroy === "function") {
-      await this.client.destroy().catch((err) => {
-        console.warn("Error destroying client during clearSession:", err);
-      });
+      await this.client.destroy();
     }
     this.client = null;
     this.isReady = false;
     this.qr = "";
 
-    // remove session directory
-    await fs.promises.rm(this.sessionPath, {
-      recursive: true,
-      force: true,
-    }).catch(async () => {
+    // remove session directory to force new auth (LocalAuth)
+    try {
+      await fs.promises.rm(this.sessionPath, {
+        recursive: true,
+        force: true,
+      });
+    } catch {
       // fallback for older Node versions
-      await fs.promises.rmdir(this.sessionPath, { recursive: true }).catch(() => {});
-    });
+      try {
+        await fs.promises.rmdir(this.sessionPath, { recursive: true });
+      } catch {
+        // ignore
+      }
+    }
 
     this.emitter.emit("session-cleared");
     // reinitialize to get a fresh QR

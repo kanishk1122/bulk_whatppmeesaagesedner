@@ -33,20 +33,38 @@ function App() {
   const imageInputRef = useRef(null);
   const whatsappService = useRef(new WhatsAppService());
 
+  // New UI states
+  const [showQRModal, setShowQRModal] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [activityLog, setActivityLog] = useState([]);
+
   useEffect(() => {
     // Initialize socket connection
     whatsappService.current.initializeSocket(
       (qrCodeDataURL) => {
         setQrCode(qrCodeDataURL);
         setIsConnected(false);
+        setShowQRModal(true);
+        setActivityLog((l) => [
+          `QR generated at ${new Date().toLocaleTimeString()}`,
+          ...l,
+        ]);
       },
       () => {
         setIsConnected(true);
         setQrCode("");
+        setShowQRModal(false);
+        setActivityLog((l) => [
+          `Client ready at ${new Date().toLocaleTimeString()}`,
+          ...l,
+        ]);
       },
       (current, total, contactName) => {
         setProgress((current / total) * 100);
         setCurrentContact(contactName);
+        setActivityLog((l) =>
+          [`${contactName} (${current}/${total})`, ...l].slice(0, 50)
+        );
       },
       () => {
         setIsConnected(false);
@@ -152,8 +170,14 @@ function App() {
       }
 
       setResults(result.results);
+      setActivityLog((l) =>
+        [`Send finished: ${result.results.length} items`, ...l].slice(0, 50)
+      );
       alert("Messages sent successfully!");
     } catch (error) {
+      setActivityLog((l) =>
+        [`Send error: ${error.message}`, ...l].slice(0, 50)
+      );
       alert(`Error sending messages: ${error.message}`);
     } finally {
       setIsSending(false);
@@ -161,38 +185,128 @@ function App() {
     }
   };
 
-  const handleLogout = async () => {
-    if (window.confirm("Are you sure you want to logout from WhatsApp?")) {
-      setIsLoggingOut(true);
-      try {
-        await whatsappService.current.logout();
-        // Reset states after logout
-        setQrCode("");
-        setIsConnected(false);
-      } catch (error) {
-        console.error("Error during logout:", error);
-        alert(`Error during logout: ${error.message}`);
-      } finally {
-        setIsLoggingOut(false);
-      }
+  // Reset session to force new QR (calls Next.js API)
+  const handleResetSession = async () => {
+    if (!confirm("Reset session and force a new QR?")) return;
+    try {
+      const res = await fetch("/api/reset-session", { method: "POST" });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Failed to reset session");
+      setActivityLog((l) =>
+        [`Session reset at ${new Date().toLocaleTimeString()}`, ...l].slice(
+          0,
+          50
+        )
+      );
+      // show QR modal while waiting for new QR
+      setShowQRModal(true);
+    } catch (err) {
+      alert(`Reset failed: ${err.message}`);
     }
   };
 
+  // Logout handler
+  const handleLogout = async () => {
+    setIsLoggingOut(true);
+    try {
+      await whatsappService.current.logout();
+      setActivityLog((l) =>
+        [`Logged out at ${new Date().toLocaleTimeString()}`, ...l].slice(0, 50)
+      );
+      setIsConnected(false);
+      setQrCode("");
+      alert("Logged out successfully");
+    } catch (error) {
+      setActivityLog((l) =>
+        [`Logout error: ${error.message}`, ...l].slice(0, 50)
+      );
+      alert(`Error logging out: ${error.message}`);
+    } finally {
+      setIsLoggingOut(false);
+    }
+  };
+
+  // Filtered contacts for search
+  const filteredContacts = contacts.filter((c) => {
+    if (!searchQuery) return true;
+    return (
+      c.displayName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      c.mobileNumber?.includes(searchQuery)
+    );
+  });
+
   return (
     <div className="app">
-      <h1>WhatsApp Bulk Messenger</h1>
+      <div
+        className="toolbar"
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginBottom: "1rem",
+        }}
+      >
+        <div>
+          <h1 style={{ margin: 0 }}>WhatsApp Bulk Messenger</h1>
+          <div style={{ fontSize: "0.9rem", marginTop: "4px" }}>
+            <span style={{ marginRight: 8 }}>
+              {isConnected ? "✅ Connected" : "❌ Disconnected"}
+            </span>
+            <button
+              onClick={handleResetSession}
+              style={{ marginLeft: 8 }}
+              className="logout-button"
+            >
+              🔄 Reset Session
+            </button>
+          </div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <small style={{ color: "#666" }}>{contacts.length} contacts</small>
+        </div>
+      </div>
 
-      {/* <div className="info-banner">
-        📱 All messages will be sent to: <strong>9314539152</strong>
-      </div> */}
+      {/* QR Modal */}
+      {showQRModal && qrCode && (
+        <div style={{ marginBottom: "1rem", textAlign: "center" }}>
+          <div
+            style={{
+              display: "inline-block",
+              padding: 12,
+              borderRadius: 8,
+              background: "#fff",
+              boxShadow: "0 6px 18px rgba(0,0,0,0.12)",
+            }}
+          >
+            <p style={{ margin: "0 0 8px 0", color: "#666" }}>
+              Scan QR with WhatsApp → Linked Devices
+            </p>
+            <img src={qrCode} alt="WhatsApp QR Code" className="qr-code" />
+            <div style={{ marginTop: 8 }}>
+              <button
+                onClick={() => setShowQRModal(false)}
+                className="remove-image-btn"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="section">
         <h2>1. WhatsApp Connection</h2>
         {qrCode && (
-          <div className="qr-section">
-            <p>Scan this QR code with your WhatsApp mobile app:</p>
-            <img src={qrCode} alt="WhatsApp QR Code" className="qr-code" />
-            <p>Open WhatsApp → Settings → Linked Devices → Link a Device</p>
+          <div className="qr-section" style={{ textAlign: "center" }}>
+            <p style={{ marginBottom: 8 }}>QR available — open modal to scan</p>
+            <button
+              onClick={() => {
+                setShowQRModal(true);
+              }}
+              className="send-button"
+            >
+              Show QR
+            </button>
           </div>
         )}
 
@@ -215,15 +329,85 @@ function App() {
         )}
       </div>
 
-      <div className="section">
-        <h2>2. Upload CSV File</h2>
-        <input
-          type="file"
-          accept=".csv"
-          onChange={handleCSVUpload}
-          ref={fileInputRef}
-        />
-        {contacts.length > 0 && <p>✅ {contacts.length} contacts loaded</p>}
+      <div
+        className="section"
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 320px",
+          gap: "1rem",
+          alignItems: "start",
+        }}
+      >
+        <div>
+          <h2>2. Upload CSV File</h2>
+          <input
+            type="file"
+            accept=".csv"
+            onChange={handleCSVUpload}
+            ref={fileInputRef}
+          />
+          {contacts.length > 0 && <p>✅ {contacts.length} contacts loaded</p>}
+          <div style={{ marginTop: 12 }}>
+            <h3 style={{ margin: "8px 0" }}>Search Contacts</h3>
+            <input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search name or number"
+              style={{
+                width: "100%",
+                padding: "8px",
+                borderRadius: 4,
+                border: "1px solid #ccc",
+              }}
+            />
+          </div>
+        </div>
+
+        <div>
+          <h2>Loaded Contacts (preview)</h2>
+          <div
+            className="contacts-preview"
+            style={{ maxHeight: 320, overflowY: "auto" }}
+          >
+            {filteredContacts.length === 0 && (
+              <p style={{ color: "#666" }}>No contacts</p>
+            )}
+            {filteredContacts.slice(0, 50).map((contact) => (
+              <div
+                key={contact.id}
+                className="contact"
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  padding: "6px 0",
+                }}
+              >
+                <div>
+                  <strong>{contact.displayName}</strong>
+                  <div style={{ fontSize: 12, color: "#666" }}>
+                    {contact.mobileNumber}
+                  </div>
+                </div>
+                <div style={{ alignSelf: "center" }}>
+                  <button
+                    className="send-button"
+                    onClick={() => {
+                      navigator.clipboard?.writeText(contact.mobileNumber);
+                      setActivityLog((l) =>
+                        [`Copied ${contact.mobileNumber}`, ...l].slice(0, 50)
+                      );
+                    }}
+                  >
+                    Copy
+                  </button>
+                </div>
+              </div>
+            ))}
+            {contacts.length > 50 && (
+              <p>...and {contacts.length - 50} more contacts</p>
+            )}
+          </div>
+        </div>
       </div>
 
       <div className="section">
@@ -403,6 +587,27 @@ function App() {
         )}
       </div>
 
+      <div className="section">
+        <h2>Activity</h2>
+        <div className="results" style={{ maxHeight: 200 }}>
+          {activityLog.length === 0 && (
+            <p style={{ color: "#666" }}>No activity yet</p>
+          )}
+          {activityLog.map((entry, i) => (
+            <div
+              key={i}
+              style={{
+                padding: "6px 0",
+                borderBottom: "1px solid #eee",
+                fontSize: 13,
+              }}
+            >
+              {entry}
+            </div>
+          ))}
+        </div>
+      </div>
+
       {results.length > 0 && (
         <div className="section">
           <h2>Results</h2>
@@ -419,22 +624,6 @@ function App() {
                 )}
               </div>
             ))}
-          </div>
-        </div>
-      )}
-
-      {contacts.length > 0 && (
-        <div className="section">
-          <h2>Loaded Contacts</h2>
-          <div className="contacts-preview">
-            {contacts.slice(0, 5).map((contact) => (
-              <div key={contact.id} className="contact">
-                {contact.displayName} - {contact.mobileNumber}
-              </div>
-            ))}
-            {contacts.length > 5 && (
-              <p>...and {contacts.length - 5} more contacts</p>
-            )}
           </div>
         </div>
       )}
