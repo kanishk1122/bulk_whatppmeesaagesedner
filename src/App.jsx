@@ -15,6 +15,13 @@ function App() {
   const [qrCode, setQrCode] = useState("");
   const [currentContact, setCurrentContact] = useState("");
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [backendLog, setBackendLog] = useState([]);
+  const [backendStatus, setBackendStatus] = useState({
+    isReady: false,
+    hasQR: false,
+  });
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [puppeteerHealth, setPuppeteerHealth] = useState(null);
 
   // Batch settings
   const [batchSettings, setBatchSettings] = useState({
@@ -34,26 +41,80 @@ function App() {
 
   useEffect(() => {
     // Initialize socket connection
-    whatsappService.current.initializeSocket(
+    const socket = whatsappService.current.initializeSocket(
       (qrCodeDataURL) => {
         setQrCode(qrCodeDataURL);
         setIsConnected(false);
+        setBackendLog((log) => [
+          `[QR] QR code generated at ${new Date().toLocaleTimeString()}`,
+          ...log,
+        ]);
       },
       () => {
         setIsConnected(true);
         setQrCode("");
+        setBackendLog((log) => [
+          `[READY] WhatsApp client ready at ${new Date().toLocaleTimeString()}`,
+          ...log,
+        ]);
       },
       (current, total, contactName) => {
         setProgress((current / total) * 100);
         setCurrentContact(contactName);
+        setBackendLog((log) => [
+          `[PROGRESS] ${contactName} (${current}/${total})`,
+          ...log,
+        ]);
       },
       () => {
         setIsConnected(false);
         setQrCode("");
         setIsLoggingOut(false);
+        setBackendLog((log) => [
+          `[LOGOUT] Logged out at ${new Date().toLocaleTimeString()}`,
+          ...log,
+        ]);
         alert("Logged out successfully");
       }
     );
+
+    // Listen for backend status and other events
+    socket.on("status-update", (status) => {
+      setBackendStatus(status);
+      setBackendLog((log) => [
+        `[STATUS] isReady: ${status.isReady}, hasQR: ${
+          status.hasQR
+        } (${new Date().toLocaleTimeString()})`,
+        ...log,
+      ]);
+    });
+    socket.on("bulk-progress", (progress) => {
+      setBackendLog((log) => [
+        `[BULK] ${progress.contact} (${progress.current}/${progress.total})`,
+        ...log,
+      ]);
+    });
+    socket.on("disconnected", (reason) => {
+      setBackendLog((log) => [
+        `[DISCONNECTED] Reason: ${reason} (${new Date().toLocaleTimeString()})`,
+        ...log,
+      ]);
+      setIsAuthenticated(false);
+    });
+    socket.on("authenticated", () => {
+      setBackendLog((log) => [
+        `[AUTHENTICATED] WhatsApp authenticated (${new Date().toLocaleTimeString()})`,
+        ...log,
+      ]);
+      setIsAuthenticated(true);
+    });
+    socket.on("logged-out", () => {
+      setBackendLog((log) => [
+        `[LOGGED-OUT] WhatsApp logged out (${new Date().toLocaleTimeString()})`,
+        ...log,
+      ]);
+      setIsAuthenticated(false);
+    });
 
     // Check initial status
     checkStatus();
@@ -66,6 +127,14 @@ function App() {
   const checkStatus = async () => {
     const status = await whatsappService.current.getStatus();
     setIsConnected(status.isReady);
+    if (status.error) {
+      setQrCode("");
+      setResults([]);
+      setCurrentContact("");
+      alert(
+        "Backend not reachable or not ready. Please check server logs or scan QR if shown."
+      );
+    }
   };
 
   const handleCSVUpload = async (event) => {
@@ -127,11 +196,6 @@ function App() {
       return;
     }
 
-    if (!isConnected) {
-      alert("Please connect to WhatsApp first");
-      return;
-    }
-
     setIsSending(true);
     setProgress(0);
     setResults([]);
@@ -150,7 +214,7 @@ function App() {
       alert("Messages sent successfully!");
     } catch (error) {
       console.error("Error sending messages:", error);
-      alert(`Error sending messages: ${error.message}`);
+      alert(`Error: ${error.message}`);
     } finally {
       setIsSending(false);
       setCurrentContact("");
@@ -174,6 +238,24 @@ function App() {
     }
   };
 
+  const checkPuppeteerHealth = async () => {
+    setPuppeteerHealth("Checking...");
+    try {
+      const res = await fetch("http://localhost:3001/api/puppeteer-health");
+      const data = await res.json();
+      setPuppeteerHealth(
+        `Puppeteer: ${
+          data.puppeteerInstalled ? "✅ Installed" : "❌ Not Installed"
+        } | ` +
+          `Chrome: ${data.chromeVersion ? data.chromeVersion : "❌ Not Found"}${
+            data.error ? " | Error: " + data.error : ""
+          }`
+      );
+    } catch (err) {
+      setPuppeteerHealth("Error: " + err.message);
+    }
+  };
+
   return (
     <div className="app">
       <h1>WhatsApp Bulk Messenger</h1>
@@ -184,14 +266,62 @@ function App() {
 
       <div className="section">
         <h2>1. WhatsApp Connection</h2>
-        {qrCode && (
+        <div style={{ marginBottom: 8 }}>
+          <strong>Backend Status:</strong>
+          <span style={{ marginLeft: 8 }}>
+            {backendStatus.isReady ? "🟢 Ready" : "🔴 Not Ready"}
+          </span>
+          <span style={{ marginLeft: 8 }}>
+            {backendStatus.hasQR ? "QR Available" : "No QR"}
+          </span>
+          <span style={{ marginLeft: 8 }}>
+            {isAuthenticated ? "🔒 Authenticated" : "🔓 Not Authenticated"}
+          </span>
+        </div>
+        {/* Puppeteer health check button and result */}
+        <div style={{ marginBottom: 8 }}>
+          <button onClick={checkPuppeteerHealth} style={{ marginRight: 8 }}>
+            Check Puppeteer/Chromium Health
+          </button>
+          {puppeteerHealth && (
+            <span
+              style={{
+                fontSize: 13,
+                color:
+                  puppeteerHealth.includes("Error") ||
+                  puppeteerHealth.includes("❌")
+                    ? "#d9534f"
+                    : "#28a745",
+              }}
+            >
+              {puppeteerHealth}
+            </span>
+          )}
+        </div>
+        {/* Show QR section if QR is available, even if qrCode is not set yet */}
+        {(qrCode || backendStatus.hasQR) && (
           <div className="qr-section">
-            <p>Scan this QR code with your WhatsApp mobile app:</p>
-            <img src={qrCode} alt="WhatsApp QR Code" className="qr-code" />
+            <p>
+              {qrCode
+                ? "Scan this QR code with your WhatsApp mobile app:"
+                : "QR code is available. Please wait for it to load or check your browser connection."}
+            </p>
+            {qrCode ? (
+              <img src={qrCode} alt="WhatsApp QR Code" className="qr-code" />
+            ) : (
+              <div style={{ color: "#d9534f", margin: "16px 0" }}>
+                QR code is being generated... If it does not appear, reload or
+                check backend logs.
+              </div>
+            )}
             <p>Open WhatsApp → Settings → Linked Devices → Link a Device</p>
+            <p style={{ color: "#d9534f" }}>
+              {isConnected
+                ? "WhatsApp is ready."
+                : "Waiting for QR scan. Please scan the QR code above."}
+            </p>
           </div>
         )}
-
         <div
           className={`connection-status ${
             isConnected ? "connected" : "disconnected"
@@ -381,7 +511,7 @@ function App() {
         <h2>6. Send Messages</h2>
         <button
           onClick={sendMessages}
-          disabled={isSending || !isConnected || contacts.length === 0}
+          disabled={isSending || contacts.length === 0}
           className="send-button"
         >
           {isSending ? "Sending..." : "Send Messages"}
@@ -397,6 +527,37 @@ function App() {
             {currentContact && <p>Sending to: {currentContact}</p>}
           </div>
         )}
+      </div>
+
+      <div className="section">
+        <h2>Backend Activity Log</h2>
+        <div
+          className="results"
+          style={{
+            maxHeight: 180,
+            overflowY: "auto",
+            fontSize: 13,
+            border: "1px solid #ddd",
+            padding: 10,
+            borderRadius: 4,
+          }}
+        >
+          {backendLog.length === 0 && (
+            <p style={{ color: "#666" }}>No backend events yet</p>
+          )}
+          {backendLog.slice(0, 50).map((entry, i) => (
+            <div
+              key={i}
+              style={{
+                padding: "4px 0",
+                borderBottom: "1px solid #eee",
+                whiteSpace: "pre-wrap",
+              }}
+            >
+              {entry}
+            </div>
+          ))}
+        </div>
       </div>
 
       {results.length > 0 && (

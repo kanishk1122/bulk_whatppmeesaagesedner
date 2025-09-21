@@ -14,6 +14,8 @@ export class WhatsAppService {
 
     this.socket.on("qr-code", (qrCodeDataURL) => {
       if (onQRCode) onQRCode(qrCodeDataURL);
+      // Always update connection status on QR event
+      this.isConnected = false;
     });
 
     this.socket.on("client-ready", () => {
@@ -39,6 +41,15 @@ export class WhatsAppService {
       if (onLoggedOut) onLoggedOut();
     });
 
+    // Always emit status-update on connect
+    this.socket.on("status-update", (status) => {
+      this.isConnected = status.isReady;
+      if (!status.isReady && status.hasQR) {
+        // QR is available, but not ready
+        console.warn("WhatsApp backend is waiting for QR scan.");
+      }
+    });
+
     return this.socket;
   }
 
@@ -46,21 +57,21 @@ export class WhatsAppService {
   async getStatus() {
     try {
       const response = await fetch(`${this.baseURL}/status`);
+      if (!response.ok) {
+        // Backend not ready or error
+        return { isReady: false, hasQR: false, error: "Backend not reachable" };
+      }
       const data = await response.json();
       this.isConnected = data.isReady;
       return data;
     } catch (error) {
       console.error("Error checking status:", error);
-      return { isReady: false, hasQR: false };
+      return { isReady: false, hasQR: false, error: "Backend not reachable" };
     }
   }
 
   // Send text message to target number
   async sendTextMessage(contact, message) {
-    if (!this.isConnected) {
-      throw new Error("WhatsApp not connected");
-    }
-
     try {
       const response = await fetch(`${this.baseURL}/send-message`, {
         method: "POST",
@@ -89,10 +100,6 @@ export class WhatsAppService {
 
   // Send image message to target number
   async sendImageMessage(contact, imageFile, caption = "") {
-    if (!this.isConnected) {
-      throw new Error("WhatsApp not connected");
-    }
-
     try {
       const formData = new FormData();
       formData.append("number", this.targetNumber);
@@ -129,13 +136,8 @@ export class WhatsAppService {
     contacts,
     message,
     imageFile = null,
-    batchSettings = null,
-    onProgress = null
+    batchSettings = null
   ) {
-    if (!this.isConnected) {
-      throw new Error("WhatsApp not connected");
-    }
-
     try {
       const formData = new FormData();
       formData.append("contacts", JSON.stringify(contacts));

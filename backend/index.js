@@ -44,28 +44,43 @@ let initializing = false; // Prevent multiple initializations
 // Safe destroy helper to avoid calling methods on null/closed contexts
 const safeDestroyClient = async (reason = "") => {
   if (!client) return;
-  console.log("Safe destroying client", reason);
+  console.log(`[WhatsAppBackend] Safe destroying client: ${reason}`);
   try {
     try {
       if (client.info) {
         // attempt graceful logout if possible
         await client.logout().catch((e) => {
-          console.warn("Logout error (ignored):", e?.message || e);
+          console.warn(
+            `[WhatsAppBackend] Logout error (ignored):`,
+            e?.message || e
+          );
         });
       }
     } catch (e) {
-      console.warn("Error during logout step:", e?.message || e);
+      console.warn(
+        `[WhatsAppBackend] Error during logout step:`,
+        e?.message || e
+      );
     }
 
     try {
       await client.destroy().catch((e) => {
-        console.warn("Destroy error (ignored):", e?.message || e);
+        console.warn(
+          `[WhatsAppBackend] Destroy error (ignored):`,
+          e?.message || e
+        );
       });
     } catch (e) {
-      console.warn("Error during destroy step:", e?.message || e);
+      console.warn(
+        `[WhatsAppBackend] Error during destroy step:`,
+        e?.message || e
+      );
     }
   } catch (e) {
-    console.warn("Unexpected error in safeDestroyClient:", e?.message || e);
+    console.warn(
+      `[WhatsAppBackend] Unexpected error in safeDestroyClient:`,
+      e?.message || e
+    );
   } finally {
     client = null;
     isClientReady = false;
@@ -74,80 +89,275 @@ const safeDestroyClient = async (reason = "") => {
   }
 };
 
+const CHROME_EXECUTABLE_PATH =
+  "C:\\Users\\kansihk soni\\chrome\\win64-140.0.7339.185\\chrome-win64\\chrome.exe";
+
 const initializeWhatsApp = () => {
   if (client || initializing) {
-    // Prevent multiple clients or double initialization
-
+    console.log(
+      `[WhatsAppBackend] Skipping initialization: client=${!!client}, initializing=${!!initializing}`
+    );
     return;
   }
   initializing = true;
-  client = new Client({
-    authStrategy: new LocalAuth(),
-    puppeteer: {
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    },
-  });
+  console.log(`[WhatsAppBackend] Initializing WhatsApp client...`);
+  try {
+    client = new Client({
+      authStrategy: new LocalAuth(),
+      puppeteer: {
+        headless: true,
+        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+        executablePath: CHROME_EXECUTABLE_PATH,
+      },
+    });
 
-  client.on("qr", async (qr) => {
-    console.log("QR Code received");
-    qrCodeString = qr;
+    client.on("qr", async (qr) => {
+      console.log(`[WhatsAppBackend] QR Code received`);
+      qrCodeString = qr;
+      try {
+        const qrCodeDataURL = await qrcode.toDataURL(qr);
+        io.emit("qr-code", qrCodeDataURL);
+        io.emit("status-update", {
+          isReady: isClientReady,
+          hasQR: !!qrCodeString,
+          reason: !isClientReady
+            ? "QR generated, waiting for scan."
+            : undefined,
+        });
+      } catch (err) {
+        console.error(`[WhatsAppBackend] Error generating QR code:`, err);
+        io.emit("status-update", {
+          isReady: isClientReady,
+          hasQR: !!qrCodeString,
+          error: "QR code generation failed: " + err.message,
+        });
+      }
+    });
 
-    // Generate QR code as data URL
-    try {
-      const qrCodeDataURL = await qrcode.toDataURL(qr);
-      io.emit("qr-code", qrCodeDataURL);
-    } catch (err) {
-      console.error("Error generating QR code:", err);
+    client.on("ready", () => {
+      console.log(`[WhatsAppBackend] WhatsApp client is ready!`);
+      isClientReady = true;
+      initializing = false;
+      io.emit("client-ready");
+      io.emit("status-update", {
+        isReady: isClientReady,
+        hasQR: !!qrCodeString,
+        reason: "WhatsApp client is fully ready.",
+      });
+      // Log client info when ready
+      if (client && client.info) {
+        console.log(`[WhatsAppBackend] Client info on ready:`, client.info);
+      }
+    });
+
+    client.on("authenticated", () => {
+      console.log(`[WhatsAppBackend] WhatsApp client authenticated`);
+      io.emit("authenticated");
+      io.emit("status-update", {
+        isReady: isClientReady,
+        hasQR: !!qrCodeString,
+        reason: !isClientReady
+          ? "Authenticated, but not ready. Waiting for WhatsApp client to emit 'ready'."
+          : "Authenticated and ready.",
+      });
+      if (client && client.info) {
+        console.log(
+          `[WhatsAppBackend] Client info after authentication:`,
+          client.info
+        );
+      }
+      if (!isClientReady) {
+        console.warn(
+          `[WhatsAppBackend] WARNING: Authenticated but not ready. Waiting for WhatsApp client to emit 'ready'.`
+        );
+        // Print possible causes for not being ready
+        console.warn(`[WhatsAppBackend] Possible causes:`);
+        console.warn(
+          `[WhatsAppBackend] - QR was scanned, but WhatsApp Web session did not fully load.`
+        );
+        console.warn(
+          `[WhatsAppBackend] - Network issues or WhatsApp Web is blocked.`
+        );
+        console.warn(
+          `[WhatsAppBackend] - Browser/puppeteer crashed or missing dependencies.`
+        );
+        console.warn(
+          `[WhatsAppBackend] - WhatsApp account is not allowed to use Web (rare).`
+        );
+        console.warn(
+          `[WhatsAppBackend] - Try scanning QR again, restarting backend, or checking for errors above.`
+        );
+      }
+    });
+
+    client.on("auth_failure", (msg) => {
+      console.error(`[WhatsAppBackend] Authentication failed:`, msg);
+      initializing = false;
+      io.emit("auth-failure", msg);
+      io.emit("status-update", {
+        isReady: isClientReady,
+        hasQR: !!qrCodeString,
+        error: "Authentication failure: " + msg,
+        reason: "Authentication failed. Please scan QR again or reset session.",
+      });
+    });
+
+    client.on("disconnected", async (reason) => {
+      console.log(`[WhatsAppBackend] WhatsApp client disconnected:`, reason);
+      await safeDestroyClient("disconnected");
+      io.emit("disconnected", reason);
+      io.emit("status-update", {
+        isReady: isClientReady,
+        hasQR: !!qrCodeString,
+        error: "Disconnected: " + reason,
+        reason: "WhatsApp client disconnected. Will attempt reinitialization.",
+      });
+      setTimeout(() => {
+        if (!client && !initializing) initializeWhatsApp();
+      }, 3000);
+    });
+
+    client.on("change_state", (state) => {
+      console.log(`[WhatsAppBackend] WhatsApp client state changed:`, state);
+      io.emit("status-update", {
+        isReady: isClientReady,
+        hasQR: !!qrCodeString,
+        state,
+        reason: `Client state changed to: ${state}`,
+      });
+      // Log state transitions for debugging
+      if (client && client.info) {
+        console.log(
+          `[WhatsAppBackend] Client info on state change:`,
+          client.info
+        );
+      }
+    });
+
+    client.on("error", (err) => {
+      console.error(`[WhatsAppBackend] WhatsApp client error:`, err);
+      io.emit("status-update", {
+        isReady: isClientReady,
+        hasQR: !!qrCodeString,
+        error: "Client error: " + err.message,
+        reason: "WhatsApp client error: " + err.message,
+      });
+      if (
+        err.message &&
+        err.message.includes("Failed to launch the browser process")
+      ) {
+        console.error(
+          `[WhatsAppBackend] Puppeteer/Chromium is missing or not installed. Please install all required dependencies for whatsapp-web.js.`
+        );
+        io.emit("status-update", {
+          isReady: false,
+          hasQR: false,
+          error: "Puppeteer/Chromium missing. See backend logs.",
+          reason: "Puppeteer/Chromium is missing or not installed.",
+        });
+      }
+    });
+
+    client.initialize().catch(async (err) => {
+      console.error(
+        `[WhatsAppBackend] Error initializing WhatsApp client:`,
+        err
+      );
+      io.emit("status-update", {
+        isReady: false,
+        hasQR: false,
+        error: "Initialization error: " + err.message,
+        reason: "WhatsApp client failed to initialize. See backend logs.",
+      });
+      if (
+        err.message &&
+        err.message.includes("Failed to launch the browser process")
+      ) {
+        console.error(
+          `[WhatsAppBackend] Puppeteer/Chromium is missing or not installed. Please install all required dependencies for whatsapp-web.js.`
+        );
+        io.emit("status-update", {
+          isReady: false,
+          hasQR: false,
+          error: "Puppeteer/Chromium missing. See backend logs.",
+          reason: "Puppeteer/Chromium is missing or not installed.",
+        });
+      }
+      await safeDestroyClient("init-error");
+    });
+  } catch (err) {
+    console.error(
+      `[WhatsAppBackend] Fatal error initializing WhatsApp client:`,
+      err
+    );
+    io.emit("status-update", {
+      isReady: false,
+      hasQR: false,
+      error: "Fatal error: " + err.message,
+      reason: "Fatal error during WhatsApp client initialization.",
+    });
+    if (
+      err.message &&
+      err.message.includes("Failed to launch the browser process")
+    ) {
+      console.error(
+        `[WhatsAppBackend] Puppeteer/Chromium is missing or not installed. Please install all required dependencies for whatsapp-web.js.`
+      );
+      io.emit("status-update", {
+        isReady: false,
+        hasQR: false,
+        error: "Puppeteer/Chromium missing. See backend logs.",
+        reason: "Puppeteer/Chromium is missing or not installed.",
+      });
     }
-  });
-
-  client.on("ready", () => {
-    console.log("WhatsApp client is ready!");
-    isClientReady = true;
     initializing = false;
-    io.emit("client-ready");
-  });
-
-  client.on("authenticated", () => {
-    console.log("WhatsApp client authenticated");
-    io.emit("authenticated");
-  });
-
-  client.on("auth_failure", (msg) => {
-    console.error("Authentication failed:", msg);
-    initializing = false;
-    io.emit("auth-failure", msg);
-  });
-
-  client.on("disconnected", async (reason) => {
-    console.log("WhatsApp client disconnected:", reason);
-    // attempt safe cleanup
-    await safeDestroyClient("disconnected");
-    io.emit("disconnected", reason);
-    // try to reinitialize after a short delay, if desired
-    setTimeout(() => {
-      if (!client && !initializing) initializeWhatsApp();
-    }, 3000);
-  });
-
-  client.initialize().catch(async (err) => {
-    console.error("Error initializing WhatsApp client:", err);
-    await safeDestroyClient("init-error");
-  });
+  }
 };
 
 // Routes
 app.get("/api/status", (req, res) => {
+  let errorMsg = undefined;
+  let reasonMsg = undefined;
+  if (!isClientReady) {
+    if (isAuthenticated()) {
+      errorMsg =
+        "WhatsApp client is authenticated but not ready. Please wait for the 'ready' event or check backend logs for issues.";
+      reasonMsg =
+        "Authenticated, but not ready. Possible reasons: WhatsApp Web session not fully loaded, browser/puppeteer issues, or network problems.";
+      // Print more details to backend log
+      console.warn(
+        `[WhatsAppBackend] /api/status: Authenticated but not ready.`
+      );
+      console.warn(
+        `[WhatsAppBackend] /api/status: error="${errorMsg}" reason="${reasonMsg}"`
+      );
+      if (client && client.info) {
+        console.warn(
+          `[WhatsAppBackend] /api/status: client.info=`,
+          client.info
+        );
+      }
+    } else {
+      errorMsg = "WhatsApp client not ready. Check backend logs for details.";
+      reasonMsg =
+        "Client not ready. Possible reasons: QR not scanned, authentication failed, or initialization error.";
+      console.warn(
+        `[WhatsAppBackend] /api/status: Not ready. error="${errorMsg}" reason="${reasonMsg}"`
+      );
+    }
+  }
   res.json({
     isReady: isClientReady,
     hasQR: !!qrCodeString,
+    error: errorMsg,
+    reason: reasonMsg,
   });
 });
 
 app.post("/api/send-message", async (req, res) => {
   try {
     if (!isClientReady) {
+      console.error(`[WhatsAppBackend] API Error: WhatsApp client not ready`);
       return res.status(400).json({ error: "WhatsApp client not ready" });
     }
 
@@ -172,7 +382,7 @@ app.post("/api/send-message", async (req, res) => {
       to: number,
     });
   } catch (error) {
-    console.error("Error sending message:", error);
+    console.error(`[WhatsAppBackend] Error sending message:`, error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -180,6 +390,7 @@ app.post("/api/send-message", async (req, res) => {
 app.post("/api/send-image", upload.single("image"), async (req, res) => {
   try {
     if (!isClientReady) {
+      console.error(`[WhatsAppBackend] API Error: WhatsApp client not ready`);
       return res.status(400).json({ error: "WhatsApp client not ready" });
     }
 
@@ -209,7 +420,7 @@ app.post("/api/send-image", upload.single("image"), async (req, res) => {
       imageName: imageFile.originalname,
     });
   } catch (error) {
-    console.error("Error sending image:", error);
+    console.error(`[WhatsAppBackend] Error sending image:`, error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -217,6 +428,7 @@ app.post("/api/send-image", upload.single("image"), async (req, res) => {
 app.post("/api/send-bulk", upload.single("image"), async (req, res) => {
   try {
     if (!isClientReady) {
+      console.error(`[WhatsAppBackend] API Error: WhatsApp client not ready`);
       return res.status(400).json({ error: "WhatsApp client not ready" });
     }
 
@@ -346,7 +558,7 @@ app.post("/api/send-bulk", upload.single("image"), async (req, res) => {
 
     res.json({ results });
   } catch (error) {
-    console.error("Error in bulk send:", error);
+    console.error(`[WhatsAppBackend] Error in bulk send:`, error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -357,6 +569,10 @@ app.post("/api/logout", async (req, res) => {
       // Use safe destroy to avoid calling methods on null contexts
       await safeDestroyClient("logout");
       io.emit("logged-out");
+      io.emit("status-update", {
+        isReady: isClientReady,
+        hasQR: !!qrCodeString,
+      });
 
       // Reinitialize after delay to allow puppeteer cleanup
       setTimeout(() => {
@@ -366,7 +582,7 @@ app.post("/api/logout", async (req, res) => {
 
     res.json({ success: true, message: "Logged out successfully" });
   } catch (error) {
-    console.error("Error during logout:", error);
+    console.error(`[WhatsAppBackend] Error during logout:`, error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -394,10 +610,10 @@ io.on("connection", (socket) => {
 
 // Global error handlers to keep server running and log issues
 process.on("unhandledRejection", (reason) => {
-  console.error("Unhandled Rejection:", reason);
+  console.error(`[WhatsAppBackend] Unhandled Rejection:`, reason);
 });
 process.on("uncaughtException", (err) => {
-  console.error("Uncaught Exception:", err);
+  console.error(`[WhatsAppBackend] Uncaught Exception:`, err);
 });
 
 // Initialize WhatsApp client
@@ -407,3 +623,98 @@ server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
 console.log(`Server running on port ${PORT}`);
+
+function isAuthenticated() {
+  return client && client.info && client.info.wid;
+}
+
+// Add API to check Puppeteer/Chromium health
+app.get("/api/puppeteer-health", async (req, res) => {
+  try {
+    const puppeteerOk = (() => {
+      try {
+        require.resolve("puppeteer");
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+
+    let chromeVersion = null;
+    let errorMsg = null;
+    let chromeFound = false;
+
+    if (puppeteerOk) {
+      try {
+        const puppeteer = require("puppeteer");
+        // Try to launch and get version (most reliable)
+        const browser = await puppeteer.launch({ headless: true });
+        try {
+          chromeVersion = await browser.version();
+          chromeFound = true;
+        } catch (verErr) {
+          errorMsg = "Puppeteer launched but could not get browser version: " + verErr.message;
+        }
+        await browser.close();
+      } catch (err) {
+        errorMsg = "Unable to launch Chrome/Chromium via Puppeteer: " + err.message;
+      }
+    } else {
+      errorMsg = "Puppeteer npm package not installed.";
+    }
+
+    // Print health check result to backend log
+    console.log(
+      `[WhatsAppBackend] Puppeteer Health Check: puppeteerInstalled=${puppeteerOk}, chromeFound=${chromeFound}, chromeVersion=${chromeVersion ? chromeVersion : "N/A"}, error=${errorMsg || "none"}`
+    );
+    res.json({
+      puppeteerInstalled: puppeteerOk,
+      chromeVersion: chromeVersion,
+      error: errorMsg,
+    });
+  } catch (err) {
+    console.error(`[WhatsAppBackend] Puppeteer Health Check API error:`, err);
+    res.status(500).json({
+      error: "Failed to check Puppeteer/Chromium health: " + err.message,
+    });
+  }
+});
+
+// Add a test API to verify Puppeteer can launch Chrome using default detection (no executablePath)
+app.get("/api/test-puppeteer-launch", async (req, res) => {
+  try {
+    const puppeteer = require("puppeteer");
+    const browser = await puppeteer.launch({
+      headless: true,
+      // No executablePath: let Puppeteer auto-detect Chrome/Chromium
+    });
+    const page = await browser.newPage();
+    // Add navigation timeout and error handling
+    try {
+      await page.goto("https://example.com", {
+        waitUntil: "domcontentloaded",
+        timeout: 15000,
+      });
+    } catch (navErr) {
+      await browser.close();
+      console.error(`[WhatsAppBackend] Puppeteer navigation failed:`, navErr);
+      return res.status(500).json({
+        success: false,
+        error: "Puppeteer launched but failed to navigate: " + navErr.message,
+      });
+    }
+    const title = await page.title();
+    await browser.close();
+    res.json({
+      success: true,
+      message: "Puppeteer launched Chrome/Chromium and navigated successfully.",
+      pageTitle: title,
+    });
+  } catch (err) {
+    console.error(`[WhatsAppBackend] Puppeteer launch test failed:`, err);
+    res.status(500).json({
+      success: false,
+      error: "Failed to launch Puppeteer/Chrome: " + err.message,
+    });
+  }
+});
